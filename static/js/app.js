@@ -360,37 +360,41 @@ function renderAvailableList() {
 
     let html = '';
     players.forEach((p, i) => {
-        const posClass = `pos-badge ${p.position}`;
         const isAuction = state && state.draft_type === 'auction';
         const actionFn  = isAuction
             ? `selectAuctionNomPlayer(${p.id}, '${p.name.replace(/'/g, "\\'")}')`
             : `confirmPick(${p.id})`;
-        const rowClick  = `showPlayerDetail(${p.id})`;
         const btnLabel  = isAuction ? 'Nominate' : 'Draft';
         const hasStats = p.volume_score != null;
-        const statsHtml = hasStats ? `<div class="component-bars">
+        const barsHtml = hasStats ? `<div class="pc-bars">
             <span class="cb" title="Volume: ${(p.volume_score*100).toFixed(0)}%"><span class="cb-fill cb-vol" style="width:${p.volume_score*100}%"></span></span>
             <span class="cb" title="Efficiency: ${(p.efficiency_score*100).toFixed(0)}%"><span class="cb-fill cb-eff" style="width:${p.efficiency_score*100}%"></span></span>
             <span class="cb" title="TD Role: ${(p.td_score*100).toFixed(0)}%"><span class="cb-fill cb-td" style="width:${p.td_score*100}%"></span></span>
             <span class="cb" title="Ceiling: ${(p.ceiling_score*100).toFixed(0)}%"><span class="cb-fill cb-ceil" style="width:${p.ceiling_score*100}%"></span></span>
         </div>` : '';
+        const pts = hasStats ? p.base_value : p.projected_points;
+        const vbdColor = p.vbd_score > 0 ? 'var(--green)' : 'var(--red)';
         const headshotInner = p.headshot_url
-            ? `<img src="${p.headshot_url}" width="46" height="46" loading="lazy" decoding="async" alt="${p.name}">`
-            : `<div class="headshot-placeholder ${p.position}">${p.position === 'DST' ? 'D' : p.position[0]}</div>`;
-        html += `<div class="player-row" onclick="${rowClick}" title="Click for details">
-            <span class="rank">#${i + 1}</span>
-            <span class="player-headshot">${headshotInner}</span>
-            <span class="${posClass}">${p.position}${p.positional_rank || ''}</span>
-            <div>
-                <div class="name">${p.name}</div>
-                <div class="team-name">${p.team} | Bye ${p.bye_week}</div>
-                ${statsHtml}
+            ? `<div class="pc-headshot"><img src="${p.headshot_url}" width="40" height="40" loading="lazy" decoding="async" alt="${p.name}"></div>`
+            : `<div class="pc-headshot-placeholder ${p.position}">${p.position === 'DST' ? 'D' : p.position[0]}</div>`;
+        html += `<div class="player-card" onclick="showPlayerDetail(${p.id})" title="Click for details">
+            <div class="pc-top">
+                <span class="pc-rank">#${i + 1}</span>
+                <span class="pos-badge ${p.position}">${p.position}${p.positional_rank || ''}</span>
             </div>
-            <span class="pts">${hasStats ? p.base_value : p.projected_points}</span>
-            <span class="vbd" style="color:${p.vbd_score > 0 ? 'var(--green)' : 'var(--red)'}">
-                VBD: ${p.vbd_score > 0 ? '+' : ''}${p.vbd_score}
-            </span>
-            <button class="draft-btn" onclick="event.stopPropagation(); ${actionFn}">${btnLabel}</button>
+            <div class="pc-body">
+                ${headshotInner}
+                <div class="pc-info">
+                    <div class="pc-name">${p.name}</div>
+                    <div class="pc-meta">${p.team} · Bye ${p.bye_week}</div>
+                </div>
+            </div>
+            ${barsHtml}
+            <div class="pc-stats">
+                <span class="pc-pts">${pts} pts</span>
+                <span class="pc-vbd" style="color:${vbdColor}">VBD ${p.vbd_score > 0 ? '+' : ''}${p.vbd_score}</span>
+            </div>
+            <button class="pc-draft-btn" onclick="event.stopPropagation(); ${actionFn}">${btnLabel}</button>
         </div>`;
     });
 
