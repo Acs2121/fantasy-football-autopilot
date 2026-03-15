@@ -352,6 +352,10 @@ function drawRadarChart(player) {
 function renderAvailableList() {
     if (!state) return;
     const container = document.getElementById('available-list');
+    const search = document.getElementById('search-player').value;
+    const key = `${cachedAvailable.length}_${currentPosFilter}_${search}`;
+    if (key === _lastAvailableKey) return;
+    _lastAvailableKey = key;
     let players = state.draft_complete ? [] : getFilteredAvailable();
 
     let html = '';
@@ -371,7 +375,7 @@ function renderAvailableList() {
             <span class="cb" title="Ceiling: ${(p.ceiling_score*100).toFixed(0)}%"><span class="cb-fill cb-ceil" style="width:${p.ceiling_score*100}%"></span></span>
         </div>` : '';
         const headshotInner = p.headshot_url
-            ? `<img src="${p.headshot_url}" loading="lazy" alt="${p.name}">`
+            ? `<img src="${p.headshot_url}" width="46" height="46" loading="lazy" decoding="async" alt="${p.name}">`
             : `<div class="headshot-placeholder ${p.position}">${p.position === 'DST' ? 'D' : p.position[0]}</div>`;
         html += `<div class="player-row" onclick="${rowClick}" title="Click for details">
             <span class="rank">#${i + 1}</span>
@@ -411,9 +415,10 @@ function getFilteredAvailable() {
 
 let cachedAvailable = [];
 let lastRenderedPickCount = -1;
+let _lastAvailableKey = '';
 
 async function fetchAvailable() {
-    cachedAvailable = await api('/api/available?limit=200');
+    cachedAvailable = await api('/api/available?limit=100');
     window._availablePlayers = cachedAvailable;  // keeper modal uses this
     renderAvailableList();
 }

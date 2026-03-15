@@ -394,6 +394,8 @@ main {
     border-radius: 6px;
     cursor: pointer;
     transition: all 0.15s;
+    content-visibility: auto;
+    contain-intrinsic-size: 0 62px;
 }
 
 .player-row:hover {
