@@ -1,0 +1,9 @@
+espn_config.json
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+data/cache/
+*.spec.bak
+.env

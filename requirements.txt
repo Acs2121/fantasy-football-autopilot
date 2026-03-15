@@ -1,0 +1,8 @@
+flask>=3.0
+requests>=2.31
+flaskwebgui>=1.1
+psutil>=7.0
+pyinstaller>=6.0
+nfl_data_py>=0.3
+pandas>=2.0
+pyarrow>=14.0

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fantasy Football Autopilot - Draft Assistant</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>Fantasy Football Autopilot</h1>
+            <div class="header-left-sub">
+                <span class="subtitle">AI Draft Assistant</span>
+                <span id="draft-type-badge" class="draft-type-badge">Snake</span>
+            </div>
+        </div>
+        <div class="header-center" id="draft-status">
+            <!-- Standard snake/best ball/dynasty status -->
+            <div id="standard-status" style="display:flex;gap:24px;align-items:center">
+                <div class="status-item">
+                    <span class="label">Round</span>
+                    <span class="value" id="current-round">1</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Pick</span>
+                    <span class="value" id="current-pick">1</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">On the Clock</span>
+                    <span class="value" id="on-the-clock">Team 1</span>
+                </div>
+                <div class="status-item" id="timer-display" style="display:none">
+                    <span class="label">Time Left</span>
+                    <span class="value" id="timer-value">1:30</span>
+                </div>
+                <div class="status-item" id="user-turn-indicator" style="display:none">
+                    <span class="value blink">YOUR PICK!</span>
+                </div>
+            </div>
+            <!-- Auction-only status -->
+            <div id="auction-status" style="display:none;gap:16px;align-items:center">
+                <div class="status-item">
+                    <span class="label">Your Budget</span>
+                    <span class="value" id="auction-budget">$200</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Nominated By</span>
+                    <span class="value" id="auction-nominator">—</span>
+                </div>
+                <div class="status-item auction-player-status">
+                    <span class="label">On the Block</span>
+                    <span class="value" id="auction-player-name">—</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Current Bid</span>
+                    <span class="value" id="auction-current-bid">$—</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">High Bidder</span>
+                    <span class="value" id="auction-high-bidder">—</span>
+                </div>
+            </div>
+        </div>
+        <div class="header-right">
+            <div id="espn-sync-badge" class="sync-badge sync-disconnected" onclick="openESPNModal()">
+                <span class="sync-dot"></span>
+                <span id="espn-sync-label">ESPN Sync</span>
+            </div>
+            <button id="btn-simulate" class="btn btn-secondary" onclick="simCPUPicks()">Simulate Draft</button>
+<button id="btn-settings" class="btn btn-secondary" onclick="openSettings()">Settings</button>
+            <button id="btn-undo" class="btn btn-secondary" onclick="undoPick()">Undo</button>
+            <button id="btn-reset" class="btn btn-danger" onclick="resetDraft()">Reset</button>
+        </div>
+    </header>
+
+    <main>
+        <!-- Left: Draft Board + Available Players -->
+        <div class="panel panel-board">
+            <div class="panel-header">
+                <h2>Draft Board</h2>
+                <div class="board-tabs">
+                    <button class="tab active" onclick="showTab('board')">Board</button>
+                    <button class="tab" onclick="showTab('available')">Available Players</button>
+                </div>
+            </div>
+
+            <!-- Draft Board Grid -->
+            <div id="board-view" class="board-content">
+                <div id="draft-board" class="draft-board"></div>
+            </div>
+
+            <!-- Available Players List -->
+            <div id="available-view" class="board-content" style="display:none">
+                <div class="filter-bar">
+                    <input type="text" id="search-player" placeholder="Search players..." oninput="filterPlayers()">
+                    <div class="pos-filters">
+                        <button class="pos-btn active" onclick="filterPosition(null, this)">ALL</button>
+                        <button class="pos-btn pos-qb" onclick="filterPosition('QB', this)">QB</button>
+                        <button class="pos-btn pos-rb" onclick="filterPosition('RB', this)">RB</button>
+                        <button class="pos-btn pos-wr" onclick="filterPosition('WR', this)">WR</button>
+                        <button class="pos-btn pos-te" onclick="filterPosition('TE', this)">TE</button>
+                        <button class="pos-btn pos-k" onclick="filterPosition('K', this)">K</button>
+                        <button class="pos-btn pos-dst" onclick="filterPosition('DST', this)">DST</button>
+                    </div>
+                </div>
+                <div id="available-list" class="available-list"></div>
+            </div>
+        </div>
+
+        <!-- Right side panels -->
+        <div class="right-panels">
+            <!-- Auction Bid Interface (hidden unless draft_type == auction) -->
+            <div id="auction-bid-panel" class="panel panel-auction" style="display:none">
+                <div class="panel-header">
+                    <h2 id="auction-panel-title">Auction</h2>
+                </div>
+                <!-- Nomination mode -->
+                <div id="auction-nominate-ui" style="display:none">
+                    <p class="auction-instruction">It's your turn to nominate a player.<br>Click any player in the Available Players list to nominate them.</p>
+                    <div class="auction-nominate-row">
+                        <label>Opening Bid</label>
+                        <div class="auction-bid-controls">
+                            <button class="btn btn-sm btn-secondary" onclick="adjustNomBid(-1)">−</button>
+                            <span id="nom-bid-display">$1</span>
+                            <button class="btn btn-sm btn-secondary" onclick="adjustNomBid(1)">+</button>
+                        </div>
+                    </div>
+                    <p id="auction-nominate-player-name" style="font-size:13px;color:var(--text-dim);margin:6px 12px">No player selected</p>
+                    <button class="btn btn-primary auction-btn-full" id="btn-auction-nominate" onclick="submitNomination()" disabled>Nominate Player</button>
+                </div>
+                <!-- Bidding mode -->
+                <div id="auction-bid-ui" style="display:none">
+                    <div class="auction-bid-details">
+                        <div class="auction-bid-row">
+                            <span class="auction-label">Est. Value</span>
+                            <span id="auction-est-value" class="auction-value">—</span>
+                        </div>
+                        <div class="auction-bid-row">
+                            <span class="auction-label">Suggested Max</span>
+                            <span id="auction-max-bid" class="auction-value">—</span>
+                        </div>
+                        <div id="auction-verdict-row" class="auction-verdict"></div>
+                    </div>
+                    <div class="auction-bid-input-row">
+                        <button class="btn btn-sm btn-secondary" onclick="adjustBid(-1)">−</button>
+                        <input type="number" id="auction-bid-amount" class="auction-bid-input" value="1" min="1">
+                        <button class="btn btn-sm btn-secondary" onclick="adjustBid(1)">+</button>
+                        <button class="btn btn-sm btn-secondary" onclick="adjustBid(5)">+5</button>
+                    </div>
+                    <div class="auction-action-row">
+                        <button class="btn btn-primary" onclick="placeBid()">Bid</button>
+                        <button class="btn btn-secondary" onclick="passBid()">Pass</button>
+                    </div>
+                </div>
+                <!-- CPU turn / waiting -->
+                <div id="auction-waiting-ui" style="display:none">
+                    <p class="auction-instruction" id="auction-waiting-msg">Waiting for other teams…</p>
+                </div>
+            </div>
+
+            <!-- User Roster -->
+            <div class="panel panel-roster">
+                <div class="panel-header">
+                    <h2>My Team</h2>
+                    <div style="display:flex;align-items:center;gap:8px">
+                    <button class="btn-export" id="btn-export" onclick="exportRoster()" title="Copy roster to clipboard">Export</button>
+                    <div class="win-prob-mini" id="win-prob-mini">
+                        <span class="win-label">Win Prob:</span>
+                        <span class="win-value" id="win-prob-value">50%</span>
+                    </div>
+                    </div>
+                </div>
+                <div id="user-roster" class="roster-grid"></div>
+                <div class="win-prob-bar">
+                    <div class="win-prob-fill" id="win-prob-fill" style="width:50%"></div>
+                </div>
+                <div class="projected-pts" id="projected-pts">Projected: 0 pts</div>
+            </div>
+
+            <!-- Recommendations -->
+            <div class="panel panel-recs">
+                <div class="panel-header">
+                    <h2>AI Recommendations</h2>
+                </div>
+                <div class="rec-sections">
+                    <div class="rec-section">
+                        <h3 id="rec-best-label">Best Available</h3>
+                        <div id="rec-best" class="rec-cards"></div>
+                    </div>
+                    <div class="rec-section">
+                        <h3 id="rec-need-label">Best by Need</h3>
+                        <div id="rec-need" class="rec-cards"></div>
+                    </div>
+                    <div class="rec-section">
+                        <h3 id="rec-sleepers-label">Sleeper Picks</h3>
+                        <div id="rec-sleepers" class="rec-cards"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Positional Scarcity -->
+            <div class="panel panel-scarcity">
+                <div class="panel-header">
+                    <h2>Positional Scarcity</h2>
+                </div>
+                <div id="scarcity-chart" class="scarcity-chart"></div>
+                <div id="scarcity-alerts" class="scarcity-alerts"></div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal" style="display:none">
+        <div class="modal-content">
+            <h2>League Settings</h2>
+            <div class="form-group">
+                <label>Number of Teams</label>
+                <select id="set-teams">
+                    <option value="8">8</option>
+                    <option value="10">10</option>
+                    <option value="12" selected>12</option>
+                    <option value="14">14</option>
+                    <option value="16">16</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Your Draft Position</label>
+                <select id="set-position"></select>
+            </div>
+            <div class="form-group">
+                <label>Number of Rounds</label>
+                <input type="number" id="set-rounds" value="15" min="10" max="20">
+            </div>
+            <div class="form-group">
+                <label>Draft Type</label>
+                <select id="set-draft-type" onchange="onDraftTypeChange()">
+                    <option value="snake">Snake Draft</option>
+                    <option value="best_ball">Best Ball</option>
+                    <option value="dynasty">Dynasty / Keeper</option>
+                    <option value="auction">Salary Cap (Auction)</option>
+                </select>
+            </div>
+            <div class="form-group" id="snake-toggle-row">
+                <label>
+                    <input type="checkbox" id="set-snake" checked> Snake order (odd rounds pick in reverse)
+                </label>
+            </div>
+            <div class="form-group" id="dynasty-row" style="display:none">
+                <label>Keeper Slots Per Team</label>
+                <input type="number" id="set-keeper-slots" value="2" min="0" max="10">
+            </div>
+            <div class="form-group">
+                <label>Seconds Per Pick <span style="color:var(--text-dim);font-weight:400">(0 = no timer)</span></label>
+                <input type="number" id="set-timer" value="90" min="0" max="300">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="applySettings()">Start Draft</button>
+                <button class="btn btn-secondary" id="btn-open-keepers" onclick="openKeepersModal()" style="display:none">Set Keepers</button>
+                <button class="btn btn-secondary" onclick="closeSettings()">Cancel</button>
+            </div>
+            <div class="sleeper-refresh-row">
+                <button class="btn btn-secondary btn-sm" onclick="sleeperRefresh()" id="btn-sleeper-refresh">
+                    ↻ Refresh Player Data
+                </button>
+                <span id="sleeper-refresh-status" class="sleeper-status"></span>
+            </div>
+            <div class="sleeper-refresh-row">
+                <button class="btn btn-secondary btn-sm" onclick="nflStatsRefresh()" id="btn-nfl-stats-refresh">
+                    ↻ Refresh NFL Stats
+                </button>
+                <span id="nfl-stats-status" class="sleeper-status"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pick Confirmation Modal -->
+    <div id="pick-modal" class="modal" style="display:none">
+        <div class="modal-content modal-sm">
+            <h2>Confirm Pick</h2>
+            <div id="pick-modal-player" class="pick-preview"></div>
+            <div class="pick-modal-team">
+                <label>Drafting Team:</label>
+                <span id="pick-modal-team-name"></span>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-primary" id="btn-confirm-pick">Draft Player</button>
+                <button class="btn btn-secondary" onclick="closePickModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Player Detail Modal -->
+    <div id="player-detail-modal" class="modal" style="display:none" onclick="if(event.target===this)closePlayerDetail()">
+        <div class="modal-content modal-player-detail">
+            <div class="pd-header">
+                <div id="pd-headshot" class="pd-headshot"></div>
+                <div class="pd-title">
+                    <div class="pd-name-row">
+                        <span id="pd-pos-badge" class="pos-badge"></span>
+                        <div id="pd-name" class="pd-name"></div>
+                    </div>
+                    <div id="pd-meta" class="pd-meta"></div>
+                </div>
+            </div>
+            <div class="pd-body">
+                <div id="pd-radar-wrap" class="pd-radar-wrap">
+                    <svg id="pd-radar" width="200" height="200" viewBox="0 0 200 200"></svg>
+                </div>
+                <div id="pd-no-stats" class="pd-no-stats" style="display:none">
+                    No 2024 stats available
+                    <span style="font-size:11px;color:var(--text-dim);display:block;margin-top:4px">Click "Refresh NFL Stats" in Settings to load component scores</span>
+                </div>
+                <div class="pd-stat-cards">
+                    <div class="pd-stat-card">
+                        <div class="pd-stat-label">Proj Pts</div>
+                        <div id="pd-proj-pts" class="pd-stat-value"></div>
+                    </div>
+                    <div class="pd-stat-card">
+                        <div class="pd-stat-label">VBD</div>
+                        <div id="pd-vbd" class="pd-stat-value"></div>
+                    </div>
+                    <div id="pd-games-card" class="pd-stat-card">
+                        <div class="pd-stat-label">2024 Games</div>
+                        <div id="pd-games" class="pd-stat-value"></div>
+                    </div>
+                    <div id="pd-age-card" class="pd-stat-card">
+                        <div class="pd-stat-label">Age</div>
+                        <div id="pd-age" class="pd-stat-value"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closePlayerDetail()">Close</button>
+                <button id="pd-draft-btn" class="btn btn-primary">Draft Player</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ESPN Sync Modal -->
+    <div id="espn-modal" class="modal" style="display:none">
+        <div class="modal-content">
+            <h2>ESPN Live Sync</h2>
+            <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px">
+                Connect to your ESPN league to auto-track picks in real time.
+            </p>
+
+            <div class="form-group">
+                <label>League ID <span style="color:var(--text-dim);font-weight:400">(from URL: fantasy.espn.com/football/league?leagueId=<b>XXXXXX</b>)</span></label>
+                <input type="number" id="espn-league-id" placeholder="e.g. 123456789">
+            </div>
+
+            <div id="espn-draft-complete-notice" style="display:none;padding:10px 14px;border-radius:6px;font-size:13px;margin-bottom:12px;background:rgba(251,191,36,0.1);color:var(--yellow);border:1px solid var(--yellow)">
+                ⚠️ This league's draft is already complete. Live sync will replay existing picks but no new picks will come in.
+            </div>
+            <div id="espn-connection-status" class="espn-status-box" style="display:none"></div>
+
+            <div id="espn-league-info" style="display:none">
+                <div class="espn-league-name" id="espn-league-name"></div>
+                <div class="espn-league-meta" id="espn-league-meta"></div>
+            </div>
+
+            <div class="modal-actions">
+                <button class="btn btn-primary" id="btn-espn-connect" onclick="connectESPN()">Connect</button>
+                <button class="btn btn-primary" id="btn-espn-start" onclick="startESPNSync()" style="display:none;background:var(--green)">Start Live Sync</button>
+                <button class="btn btn-secondary" id="btn-espn-stop" onclick="stopESPNSync()" style="display:none">Stop Sync</button>
+                <button class="btn btn-secondary" onclick="closeESPNModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Keepers Modal (dynasty mode) -->
+    <div id="keepers-modal" class="modal" style="display:none">
+        <div class="modal-content modal-lg">
+            <h2>Assign Keepers</h2>
+            <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px">
+                Select keeper players for each team. Keepers are removed from the draft pool and pre-fill roster slots.
+            </p>
+            <div id="keepers-team-list" class="keepers-team-list"></div>
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="saveKeepers()">Save Keepers</button>
+                <button class="btn btn-secondary" onclick="closeKeepersModal()">Cancel</button>
+            </div>
+            <div id="keepers-status" style="font-size:12px;color:var(--text-dim);margin-top:8px;text-align:right"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
