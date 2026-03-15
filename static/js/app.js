@@ -347,18 +347,10 @@ function drawRadarChart(player) {
     svg.innerHTML = parts.join('');
 }
 
-// ============ Available Players (Virtual Scroll) ============
+// ============ Available Players (Paginated) ============
 
-const VC_CARD_H  = 140; // fixed card height px
-const VC_GAP     = 6;   // gap between cards px
-const VC_ROW_H   = VC_CARD_H + VC_GAP;
-const VC_COLS    = 2;
-const VC_BUFFER  = 4;   // extra rows to render above/below viewport
-
-let _vsPlayers       = [];
-let _vsLastFirstRow  = -1;
-let _vsLastLastRow   = -1;
-let _vsRafPending    = false;
+const PAGE_SIZE = 25;
+let _availPage  = 0;
 
 function renderAvailableList() {
     if (!state) return;
@@ -366,85 +358,78 @@ function renderAvailableList() {
     const key = `${cachedAvailable.length}_${currentPosFilter}_${search}`;
     if (key === _lastAvailableKey) return;
     _lastAvailableKey = key;
-    _vsPlayers = state.draft_complete ? [] : getFilteredAvailable();
-    _vsLastFirstRow = -1; // force re-render
-    _vsLastLastRow  = -1;
-    _renderVirtualCards();
+    _availPage = 0; // reset to first page on any filter/data change
+    _renderPage();
 }
 
-function _renderVirtualCards() {
-    const container = document.getElementById('available-list');
-    if (!container) return;
+function _renderPage() {
+    const container  = document.getElementById('available-list');
+    const pagination = document.getElementById('available-pagination');
+    if (!container || !state) return;
 
-    if (!_vsPlayers.length) {
-        container.innerHTML = '<p style="padding:20px;text-align:center;color:var(--text-dim);grid-column:1/-1">No players available</p>';
+    const all     = state.draft_complete ? [] : getFilteredAvailable();
+    const total   = all.length;
+    const pages   = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    _availPage    = Math.min(_availPage, pages - 1);
+    const start   = _availPage * PAGE_SIZE;
+    const players = all.slice(start, start + PAGE_SIZE);
+
+    if (!total) {
+        container.innerHTML = '<p style="padding:20px;text-align:center;color:var(--text-dim)">No players available</p>';
+        pagination.innerHTML = '';
         return;
     }
-
-    const totalRows   = Math.ceil(_vsPlayers.length / VC_COLS);
-    const totalHeight = totalRows * VC_ROW_H;
-    const scrollTop   = container.scrollTop;
-    const viewH       = container.clientHeight || 600;
-
-    const firstRow = Math.max(0, Math.floor(scrollTop / VC_ROW_H) - VC_BUFFER);
-    const lastRow  = Math.min(totalRows - 1, Math.ceil((scrollTop + viewH) / VC_ROW_H) + VC_BUFFER);
-
-    if (firstRow === _vsLastFirstRow && lastRow === _vsLastLastRow) return;
-    _vsLastFirstRow = firstRow;
-    _vsLastLastRow  = lastRow;
 
     const isAuction = state && state.draft_type === 'auction';
     const btnLabel  = isAuction ? 'Nominate' : 'Draft';
 
-    let cards = '';
-    for (let r = firstRow; r <= lastRow; r++) {
-        for (let c = 0; c < VC_COLS; c++) {
-            const idx = r * VC_COLS + c;
-            if (idx >= _vsPlayers.length) break;
-            const p = _vsPlayers[idx];
-            const top  = r * VC_ROW_H;
-            const left = c === 0 ? '0' : `calc(50% + ${VC_GAP / 2}px)`;
-            const actionFn = isAuction
-                ? `selectAuctionNomPlayer(${p.id}, '${p.name.replace(/'/g, "\\'")}')`
-                : `confirmPick(${p.id})`;
-            const hasStats = p.volume_score != null;
-            const vol  = hasStats ? (p.volume_score  * 100).toFixed(0) : 0;
-            const eff  = hasStats ? (p.efficiency_score * 100).toFixed(0) : 0;
-            const td   = hasStats ? (p.td_score  * 100).toFixed(0) : 0;
-            const ceil = hasStats ? (p.ceiling_score * 100).toFixed(0) : 0;
-            const pts  = hasStats ? p.base_value : p.projected_points;
-            const vbdColor = p.vbd_score > 0 ? 'var(--green)' : 'var(--red)';
-            const headshot = p.headshot_url
-                ? `<div class="pc-headshot"><img src="${p.headshot_url}" width="40" height="40" loading="lazy" decoding="async" alt="${p.name}"></div>`
-                : `<div class="pc-headshot-placeholder ${p.position}">${p.position === 'DST' ? 'D' : p.position[0]}</div>`;
-            cards += `<div class="player-card" style="position:absolute;top:${top}px;left:${left};width:calc(50% - ${VC_GAP / 2}px)" onclick="showPlayerDetail(${p.id})">
-                <div class="pc-top">
-                    <span class="pc-rank">${idx + 1}</span>
-                    <span class="pos-badge ${p.position}">${p.position}${p.positional_rank || ''}</span>
-                </div>
-                <div class="pc-body">${headshot}<div class="pc-info"><div class="pc-name">${p.name}</div><div class="pc-meta">${p.team} · Bye ${p.bye_week}</div></div></div>
-                <div class="pc-bars">
-                    <span class="cb" title="Vol ${vol}%"><span class="cb-fill cb-vol" style="width:${vol}%"></span></span>
-                    <span class="cb" title="Eff ${eff}%"><span class="cb-fill cb-eff" style="width:${eff}%"></span></span>
-                    <span class="cb" title="TD ${td}%"><span class="cb-fill cb-td" style="width:${td}%"></span></span>
-                    <span class="cb" title="Ceil ${ceil}%"><span class="cb-fill cb-ceil" style="width:${ceil}%"></span></span>
-                </div>
-                <div class="pc-stats"><span class="pc-pts">${pts} pts</span><span class="pc-vbd" style="color:${vbdColor}">VBD ${p.vbd_score > 0 ? '+' : ''}${p.vbd_score}</span></div>
-                <button class="pc-draft-btn" onclick="event.stopPropagation();${actionFn}">${btnLabel}</button>
-            </div>`;
-        }
-    }
+    let html = '';
+    players.forEach((p, i) => {
+        const globalIdx = start + i;
+        const actionFn  = isAuction
+            ? `selectAuctionNomPlayer(${p.id}, '${p.name.replace(/'/g, "\\'")}')`
+            : `confirmPick(${p.id})`;
+        const hasStats  = p.volume_score != null;
+        const vol  = hasStats ? (p.volume_score      * 100).toFixed(0) : 0;
+        const eff  = hasStats ? (p.efficiency_score  * 100).toFixed(0) : 0;
+        const td   = hasStats ? (p.td_score          * 100).toFixed(0) : 0;
+        const ceil = hasStats ? (p.ceiling_score     * 100).toFixed(0) : 0;
+        const pts  = hasStats ? p.base_value : p.projected_points;
+        const vbdColor = p.vbd_score > 0 ? 'var(--green)' : 'var(--red)';
+        const headshot = p.headshot_url
+            ? `<div class="pc-headshot"><img src="${p.headshot_url}" width="40" height="40" loading="lazy" decoding="async" alt="${p.name}"></div>`
+            : `<div class="pc-headshot-placeholder ${p.position}">${p.position === 'DST' ? 'D' : p.position[0]}</div>`;
+        html += `<div class="player-card" onclick="showPlayerDetail(${p.id})">
+            <div class="pc-top">
+                <span class="pc-rank">${globalIdx + 1}</span>
+                <span class="pos-badge ${p.position}">${p.position}${p.positional_rank || ''}</span>
+            </div>
+            <div class="pc-body">${headshot}<div class="pc-info"><div class="pc-name">${p.name}</div><div class="pc-meta">${p.team} · Bye ${p.bye_week}</div></div></div>
+            <div class="pc-bars">
+                <span class="cb" title="Vol ${vol}%"><span class="cb-fill cb-vol" style="width:${vol}%"></span></span>
+                <span class="cb" title="Eff ${eff}%"><span class="cb-fill cb-eff" style="width:${eff}%"></span></span>
+                <span class="cb" title="TD ${td}%"><span class="cb-fill cb-td" style="width:${td}%"></span></span>
+                <span class="cb" title="Ceil ${ceil}%"><span class="cb-fill cb-ceil" style="width:${ceil}%"></span></span>
+            </div>
+            <div class="pc-stats"><span class="pc-pts">${pts} pts</span><span class="pc-vbd" style="color:${vbdColor}">VBD ${p.vbd_score > 0 ? '+' : ''}${p.vbd_score}</span></div>
+            <button class="pc-draft-btn" onclick="event.stopPropagation();${actionFn}">${btnLabel}</button>
+        </div>`;
+    });
 
-    container.innerHTML = `<div style="position:relative;height:${totalHeight}px">${cards}</div>`;
+    container.innerHTML = html;
+
+    // Pagination controls
+    pagination.innerHTML = `
+        <button class="pg-btn" onclick="availGoPage(${_availPage - 1})" ${_availPage === 0 ? 'disabled' : ''}>&#8592;</button>
+        <span class="pg-label">Page ${_availPage + 1} of ${pages} &nbsp;<span class="pg-count">${total} players</span></span>
+        <button class="pg-btn" onclick="availGoPage(${_availPage + 1})" ${_availPage >= pages - 1 ? 'disabled' : ''}>&#8594;</button>
+    `;
 }
 
-function _onVsScroll() {
-    if (_vsRafPending) return;
-    _vsRafPending = true;
-    requestAnimationFrame(() => {
-        _vsRafPending = false;
-        if (_vsPlayers.length) _renderVirtualCards();
-    });
+function availGoPage(page) {
+    _availPage = page;
+    _renderPage();
+    document.getElementById('available-list').scrollTop = 0;
 }
 
 function getFilteredAvailable() {
@@ -1430,10 +1415,6 @@ async function silentDataRefresh() {
 }
 
 async function init() {
-    // Wire virtual scroll listener once
-    const availEl = document.getElementById('available-list');
-    if (availEl) availEl.addEventListener('scroll', _onVsScroll, { passive: true });
-
     await fetchAvailable();
     await refreshAll();
 
