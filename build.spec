@@ -6,7 +6,6 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files
 block_cipher = None
 
 # Collect all submodules + data for packages PyInstaller commonly misses
-nfl_datas,    nfl_bins,  nfl_hidden    = collect_all('nfl_data_py')
 pd_datas,     pd_bins,   pd_hidden     = collect_all('pandas')
 pa_datas,     pa_bins,   pa_hidden     = collect_all('pyarrow')
 req_datas,    req_bins,  req_hidden    = collect_all('requests')
@@ -15,7 +14,6 @@ a = Analysis(
     ['AutoPicker_Desktop.py'],
     pathex=['.'],
     binaries=[
-        *nfl_bins,
         *pd_bins,
         *pa_bins,
         *req_bins,
@@ -26,7 +24,6 @@ a = Analysis(
         ('data',       'data'),
         ('config.py',  '.'),
         ('engine',     'engine'),
-        *nfl_datas,
         *pd_datas,
         *pa_datas,
         *req_datas,
@@ -40,7 +37,6 @@ a = Analysis(
         'jinja2',
         'engineio.async_drivers.threading',
         # New data pipeline
-        'nfl_data_py',
         'appdirs',
         'pandas',
         'pyarrow',
@@ -58,8 +54,7 @@ a = Analysis(
         'pandas._libs.ops',
         'pandas._libs.skiplist',
         # Spread entries from collect_all
-        *nfl_hidden,
-        *pd_hidden,
+                *pd_hidden,
         *pa_hidden,
         *req_hidden,
     ],

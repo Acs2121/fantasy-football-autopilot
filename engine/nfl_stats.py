@@ -1,7 +1,12 @@
 """
-Fetch and cache NFL stats from nfl_data_py (nflverse).
+Fetch and cache NFL stats from nflverse.
 
-Pulls weekly player stats, snap counts, and roster data for a given season.
+Reads the nflverse-data parquet releases directly rather than going through
+nfl_data_py. That library pins pandas<2 and, as of 0.3.3, still requests
+`player_stats_{year}.parquet` -- an asset nflverse renamed to
+`stats_player_week_{year}.parquet`, so every weekly fetch 404s. Reading the
+URLs ourselves fixes the break and frees the pandas version.
+
 Converts pandas DataFrames to plain dicts at the boundary -- the rest of the
 app stays pandas-free.
 
@@ -9,17 +14,40 @@ Cache files go into data/cache/ and are reused until the user explicitly
 triggers a refresh.
 """
 
+import datetime
 import json
 import logging
 import math
 import os
+
+from .season import last_completed_season
 
 logger = logging.getLogger(__name__)
 
 _CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "cache")
 _POSITIONS = {"QB", "RB", "WR", "TE"}
 
-# Columns we need from weekly data (avoids pulling all 53)
+_NFLVERSE = "https://github.com/nflverse/nflverse-data/releases/download"
+
+def _weekly_url(year):
+    return f"{_NFLVERSE}/stats_player/stats_player_week_{year}.parquet"
+
+def _roster_url(year):
+    return f"{_NFLVERSE}/rosters/roster_{year}.parquet"
+
+def _snaps_url(year):
+    return f"{_NFLVERSE}/snap_counts/snap_counts_{year}.parquet"
+
+
+# nflverse renamed several columns. Map current names back to the ones this
+# module's aggregation code expects, so the maths below stays untouched.
+_COLUMN_ALIASES = {
+    "team": "recent_team",
+    "passing_interceptions": "interceptions",
+    "sacks_suffered": "sacks",
+}
+
+# Columns we need from weekly data (avoids pulling all 150)
 _WEEKLY_COLS = [
     "player_display_name", "player_id", "position", "recent_team", "season_type", "week",
     "carries", "rushing_yards", "rushing_tds", "rushing_fumbles",
@@ -46,11 +74,15 @@ _TOTAL_KEYS = [
 _AVG_KEYS = ["target_share", "air_yards_share", "wopr", "rushing_epa", "receiving_epa", "passing_epa"]
 
 
-def fetch_and_cache(year=2024):
+def fetch_and_cache(year=None):
     """Fetch all NFL stats for *year*, cache to disk, return processed dict.
+
+    Defaults to the most recent completed season -- during draft season that is
+    last year, since the upcoming season has no games played yet.
 
     Returns {player_display_name: {stats dict}} keyed by display name.
     """
+    year = int(year or last_completed_season())
     os.makedirs(_CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(_CACHE_DIR, f"player_stats_{year}.json")
 
@@ -70,8 +102,9 @@ def fetch_and_cache(year=2024):
     return stats
 
 
-def force_refresh(year=2024):
+def force_refresh(year=None):
     """Delete cache and re-fetch."""
+    year = int(year or last_completed_season())
     cache_path = os.path.join(_CACHE_DIR, f"player_stats_{year}.json")
     if os.path.exists(cache_path):
         os.remove(cache_path)
@@ -91,23 +124,41 @@ def _safe_float(v, default=0.0):
         return default
 
 
-def _build_player_stats(year):
-    """Pull data from nfl_data_py and aggregate into per-player stat dicts."""
-    import nfl_data_py as nfl
+def _read_parquet(url, what):
+    """Read one nflverse parquet, normalizing renamed columns."""
+    import pandas as pd
 
+    logger.info("Fetching %s from nflverse...", what)
+    df = pd.read_parquet(url)
+    renames = {old: new for old, new in _COLUMN_ALIASES.items()
+               if old in df.columns and new not in df.columns}
+    return df.rename(columns=renames) if renames else df
+
+
+def _build_player_stats(year):
+    """Pull data from nflverse and aggregate into per-player stat dicts."""
     # 1. Weekly stats (main source)
-    logger.info("Fetching weekly data for %d...", year)
-    weekly = nfl.import_weekly_data([year], downcast=False)
+    weekly = _read_parquet(_weekly_url(year), f"weekly stats {year}")
     weekly = weekly[(weekly["season_type"] == "REG") & (weekly["position"].isin(_POSITIONS))]
+
+    # Keep only the columns we actually use, when present.
+    keep = [c for c in _WEEKLY_COLS if c in weekly.columns]
+    missing = [c for c in _WEEKLY_COLS if c not in weekly.columns]
+    if missing:
+        # Not fatal -- _safe_float defaults absent metrics to 0 -- but a silent
+        # schema drift is exactly how stale/wrong numbers creep in, so say so.
+        logger.warning("nflverse weekly data is missing columns: %s", ", ".join(missing))
+    weekly = weekly[keep]
 
     # Convert to list of dicts once — avoids slow iterrows()
     weekly_records = weekly.to_dict("records")
 
     # 2. Snap counts
-    snap_lookup = _build_snap_lookup(nfl, year)
+    snap_lookup = _build_snap_lookup(year)
 
-    # 3. Rosters
-    roster_lookup = _build_roster_lookup(nfl, year)
+    # 3. Rosters — use the UPCOMING season's roster so teams, rookie flags and
+    #    cross-platform ids reflect where players are now, not last year.
+    roster_lookup = _build_roster_lookup(year + 1, fallback_year=year)
 
     # Group weekly records by player name and compute team totals in one pass
     player_weeks = {}
@@ -177,13 +228,13 @@ def _build_player_stats(year):
     return result
 
 
-def _build_snap_lookup(nfl, year):
+def _build_snap_lookup(year):
     """Build {(player_name, team): [offense_pct values]} from snap counts."""
     try:
-        snaps = nfl.import_snap_counts([year])
+        snaps = _read_parquet(_snaps_url(year), f"snap counts {year}")
         snaps = snaps[snaps["game_type"] == "REG"]
-    except Exception:
-        logger.warning("Snap counts unavailable for %d", year)
+    except Exception as exc:
+        logger.warning("Snap counts unavailable for %d: %s", year, exc)
         return {}
 
     lookup = {}
@@ -193,24 +244,56 @@ def _build_snap_lookup(nfl, year):
     return lookup
 
 
-def _build_roster_lookup(nfl, year):
-    """Build {player_id: {age, years_exp, espn_id}} from seasonal rosters."""
+def _age_from_birth_date(value, on_date=None):
+    """Age in years from a birth date, or 0.0 when unknown."""
+    if not value:
+        return 0.0
     try:
-        rosters = nfl.import_seasonal_rosters([year])
-    except Exception:
-        logger.warning("Roster data unavailable for %d", year)
+        if isinstance(value, str):
+            born = datetime.date.fromisoformat(value[:10])
+        else:
+            born = datetime.date(value.year, value.month, value.day)
+    except (ValueError, TypeError, AttributeError):
+        return 0.0
+    today = on_date or datetime.date.today()
+    years = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+    return float(years) if 15 <= years <= 60 else 0.0
+
+
+def _build_roster_lookup(year, fallback_year=None):
+    """Build {player_id: {age, years_exp, espn_id, sleeper_id, ...}} from rosters.
+
+    nflverse rosters carry cross-platform ids (espn_id, sleeper_id), which is
+    what lets ESPN draft sync match on id instead of guessing from names.
+    Age isn't a column -- it's derived from birth_date.
+    """
+    rosters = None
+    for attempt in [y for y in (year, fallback_year) if y]:
+        try:
+            rosters = _read_parquet(_roster_url(attempt), f"rosters {attempt}")
+            break
+        except Exception as exc:
+            logger.warning("Roster data unavailable for %d: %s", attempt, exc)
+    if rosters is None:
         return {}
 
     lookup = {}
     for row in rosters.to_dict("records"):
-        pid = row.get("player_id", "")
-        if pid:
-            espn_id = row.get("espn_id")
-            lookup[pid] = {
-                "age":       _safe_float(row.get("age", 0)),
-                "years_exp": int(_safe_float(row.get("years_exp", 0))),
-                "espn_id":   str(espn_id) if espn_id else "",
-            }
+        # nflverse uses gsis_id here; weekly stats call the same value player_id.
+        pid = row.get("player_id") or row.get("gsis_id") or ""
+        if not pid:
+            continue
+        espn_id = row.get("espn_id")
+        sleeper_id = row.get("sleeper_id")
+        rookie_year = row.get("rookie_year") or row.get("entry_year")
+        lookup[str(pid)] = {
+            "age":         _age_from_birth_date(row.get("birth_date")),
+            "years_exp":   int(_safe_float(row.get("years_exp", 0))),
+            "espn_id":     str(int(espn_id)) if _safe_float(espn_id) else "",
+            "sleeper_id":  str(int(sleeper_id)) if _safe_float(sleeper_id) else "",
+            "rookie_year": int(_safe_float(rookie_year)) if rookie_year else 0,
+            "current_team": str(row.get("recent_team") or row.get("team") or ""),
+        }
     return lookup
 
 

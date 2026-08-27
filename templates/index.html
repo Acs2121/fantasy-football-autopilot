@@ -75,6 +75,14 @@
         </div>
     </header>
 
+    <div id="stale-data-banner" style="display:none;margin:0 20px 12px;padding:12px 16px;border-radius:8px;
+         background:rgba(180,83,9,0.10);border:1px solid var(--yellow);color:var(--yellow);font-size:13px">
+        <b>⚠️ Player data is from the <span id="stale-data-year"></span> season.</b>
+        Projections, ADP and the rookie class are out of date for
+        <span id="stale-current-year"></span>. Recommendations will look confident but be wrong.
+        Open <b>Settings</b> and click <b>Refresh All Data</b> to pull current numbers.
+    </div>
+
     <main>
         <!-- Left: Draft Board + Available Players -->
         <div class="panel panel-board">
@@ -261,17 +269,18 @@
                 <button class="btn btn-secondary" id="btn-open-keepers" onclick="openKeepersModal()" style="display:none">Set Keepers</button>
                 <button class="btn btn-secondary" onclick="closeSettings()">Cancel</button>
             </div>
-            <div class="sleeper-refresh-row">
-                <button class="btn btn-secondary btn-sm" onclick="sleeperRefresh()" id="btn-sleeper-refresh">
-                    ↻ Refresh Player Data
-                </button>
-                <span id="sleeper-refresh-status" class="sleeper-status"></span>
-            </div>
-            <div class="sleeper-refresh-row">
-                <button class="btn btn-secondary btn-sm" onclick="nflStatsRefresh()" id="btn-nfl-stats-refresh">
-                    ↻ Refresh NFL Stats
-                </button>
-                <span id="nfl-stats-status" class="sleeper-status"></span>
+            <div style="border-top:1px solid var(--border,#2a2f3a);margin-top:16px;padding-top:14px">
+                <div class="sleeper-refresh-row">
+                    <button class="btn btn-secondary btn-sm" onclick="refreshAllData()" id="btn-data-refresh">
+                        ⟳ Refresh All Data
+                    </button>
+                    <span id="data-refresh-status" class="sleeper-status"></span>
+                </div>
+                <p style="font-size:11px;color:var(--text-dim);margin:6px 0 0;line-height:1.5">
+                    Rebuilds everything from live sources: current rosters and team changes,
+                    this year's rookies, bye weeks, ADP and projections, and last season's
+                    production. Takes a few minutes. Nothing is overwritten unless it succeeds.
+                </p>
             </div>
         </div>
     </div>
@@ -311,7 +320,7 @@
                 </div>
                 <div id="pd-no-stats" class="pd-no-stats" style="display:none">
                     No 2024 stats available
-                    <span style="font-size:11px;color:var(--text-dim);display:block;margin-top:4px">Click "Refresh NFL Stats" in Settings to load component scores</span>
+                    <span style="font-size:11px;color:var(--text-dim);display:block;margin-top:4px">Click "Refresh All Data" in Settings to load component scores</span>
                 </div>
                 <div class="pd-stat-cards">
                     <div class="pd-stat-card">
@@ -347,12 +356,58 @@
                 Connect to your ESPN league to auto-track picks in real time.
             </p>
 
-            <div class="form-group">
-                <label>League ID <span style="color:var(--text-dim);font-weight:400">(from URL: fantasy.espn.com/football/league?leagueId=<b>XXXXXX</b>)</span></label>
-                <input type="number" id="espn-league-id" placeholder="e.g. 123456789">
+            <div id="espn-connect-box" style="padding:16px;border-radius:8px;margin-bottom:14px;background:var(--accent-soft);border:1px solid var(--accent)">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                    <button class="btn btn-primary" id="btn-espn-go" onclick="espnConnectFlow()">Connect ESPN</button>
+                    <span id="espn-flow-state" style="font-size:13px;color:var(--text-dim)"></span>
+                </div>
+                <p id="espn-flow-note" style="font-size:12px;color:var(--text-dim);margin:10px 0 0">
+                    Signs you in, finds your leagues, and starts live sync. If you're not
+                    already signed in, ESPN's own sign-in page opens in a browser window —
+                    your password goes to ESPN, never to this app.
+                </p>
             </div>
 
-            <div id="espn-draft-complete-notice" style="display:none;padding:10px 14px;border-radius:6px;font-size:13px;margin-bottom:12px;background:rgba(251,191,36,0.1);color:var(--yellow);border:1px solid var(--yellow)">
+            <div id="espn-league-picker" style="display:none;margin-bottom:14px">
+                <label style="display:block;margin-bottom:8px">You're in more than one league — pick the one you're drafting:</label>
+                <div id="espn-league-list" style="display:flex;flex-direction:column;gap:6px"></div>
+            </div>
+
+            <details id="espn-creds" style="margin-bottom:14px">
+                <summary style="cursor:pointer;font-size:13px;color:var(--text-dim);user-select:none">
+                    Advanced <span id="espn-creds-state"></span>
+                </summary>
+
+                <div class="form-group" style="margin-top:12px">
+                    <label>League ID <span style="color:var(--text-dim);font-weight:400">(only if auto-detection fails)</span></label>
+                    <input type="number" id="espn-league-id" placeholder="e.g. 1273679521">
+                </div>
+                <div class="form-group">
+                    <label>Season <span style="color:var(--text-dim);font-weight:400">(defaults to the current season)</span></label>
+                    <input type="number" id="espn-year" placeholder="2026">
+                </div>
+                <div style="display:flex;gap:8px;margin-bottom:14px">
+                    <button class="btn btn-secondary" id="btn-espn-connect" onclick="connectESPN()">Connect to this League ID</button>
+                </div>
+
+                <p style="font-size:12px;color:var(--text-dim);margin:10px 0">
+                    Cookies below are only needed if sign-in doesn't work. On fantasy.espn.com press
+                    <b>F12</b>, open the <b>Console</b> tab, and run
+                    <code>document.cookie.match(/SWID=([^;]+)/)?.[1]</code> then
+                    <code>document.cookie.match(/espn_s2=([^;]+)/)?.[1]</code>.
+                    Values are stored only in <code>espn_config.json</code> on this machine.
+                </p>
+                <div class="form-group">
+                    <label>SWID <span style="color:var(--text-dim);font-weight:400">(include the curly braces)</span></label>
+                    <input type="password" id="espn-swid" placeholder="{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>espn_s2</label>
+                    <input type="password" id="espn-s2" placeholder="AEB...long string..." autocomplete="off">
+                </div>
+            </details>
+
+            <div id="espn-draft-complete-notice" style="display:none;padding:10px 14px;border-radius:6px;font-size:13px;margin-bottom:12px;background:rgba(180,83,9,0.10);color:var(--yellow);border:1px solid var(--yellow)">
                 ⚠️ This league's draft is already complete. Live sync will replay existing picks but no new picks will come in.
             </div>
             <div id="espn-connection-status" class="espn-status-box" style="display:none"></div>
@@ -363,7 +418,6 @@
             </div>
 
             <div class="modal-actions">
-                <button class="btn btn-primary" id="btn-espn-connect" onclick="connectESPN()">Connect</button>
                 <button class="btn btn-primary" id="btn-espn-start" onclick="startESPNSync()" style="display:none;background:var(--green)">Start Live Sync</button>
                 <button class="btn btn-secondary" id="btn-espn-stop" onclick="stopESPNSync()" style="display:none">Stop Sync</button>
                 <button class="btn btn-secondary" onclick="closeESPNModal()">Close</button>

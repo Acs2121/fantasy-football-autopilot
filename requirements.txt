@@ -3,6 +3,15 @@ requests>=2.31
 flaskwebgui>=1.1
 psutil>=7.0
 pyinstaller>=6.0
-nfl_data_py>=0.3
+
+# nflverse parquet feeds are read directly with pandas/pyarrow.
+# nfl_data_py was removed: it pins pandas<2, and as of 0.3.3 it still requests
+# player_stats_<year>.parquet, an asset nflverse renamed — so every weekly
+# stats fetch through it returns 404.
 pandas>=2.0
 pyarrow>=14.0
+
+# ESPN sign-in: playwright drives the user's installed Chrome/Edge for the
+# login window; browser_cookie3 finds an already-signed-in session.
+browser_cookie3>=0.19
+playwright>=1.40

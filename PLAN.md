@@ -194,9 +194,69 @@ Architecture: add `draft_type` field to `DraftState` and branch type-specific be
 
 ---
 
+---
+
+## Phase 13 — Season Rollover & Dependency Repair ✅
+
+Everything here was driven by one rule: the app must not present stale or
+invented numbers as current.
+
+### Dependencies
+- ✅ **Removed `nfl_data_py`** — it pins `pandas<2` (silently downgrading pandas
+  to 1.5.3, contradicting our own `pandas>=2.0`), and as of 0.3.3 it requests
+  `player_stats_<year>.parquet`, an asset nflverse renamed. Every weekly stats
+  fetch was returning **404**, so "Refresh NFL Stats" was broken regardless of year.
+- ✅ `nfl_stats.py` now reads the nflverse parquet releases directly
+  (`stats_player/stats_player_week_<year>.parquet`, `rosters/`, `snap_counts/`)
+- ✅ Column aliases for nflverse renames: `team`→`recent_team`,
+  `passing_interceptions`→`interceptions`, `sacks_suffered`→`sacks`
+- ✅ Clean-venv install verified: pandas 3.0.5, numpy 2.4.6, zero conflicts
+- ✅ `build.spec` and the launcher updated to match
+
+### Season handling — no more hardcoded years
+- ✅ New `engine/season.py`: `current_season_year()` and `last_completed_season()`
+- ✅ `espn_sync.py`, `sleeper_sync.py`, `nfl_stats.py`, and the `/api/stats/refresh`
+  and `/api/sleeper/refresh` routes all derive the year instead of hardcoding it
+- ✅ `rankings.py` loads `players_<current season>.json`, falling back to the
+  newest available file **with a loud warning** rather than silently
+- ✅ Renamed `games_played_2024` → `games_played_last_season`
+
+### Data honesty
+- ✅ **Stale-data banner** — the app states outright when its dataset is from a
+  prior season, because stale projections look exactly as confident as fresh ones
+- ✅ **Unresolved picks surfaced** — ESPN picks that can't be matched to a player
+  are skipped (never guessed) and now *reported* in sync status, so an incomplete
+  draft board is visible rather than invisible
+- ✅ **ESPN id matching** — `_espn_id_map` is seeded from the dataset's own
+  `espn_id` fields, so pick matching is an exact id lookup rather than a name
+  guess. Closes the Phase 3 item and the "wrong player recorded" risk.
+
+### `rebuild_players.py` (new)
+Regenerates the dataset for the current season from live sources only:
+- nflverse rosters → current teams, positions, rookie flags, espn_id + sleeper_id
+- nflverse schedule → bye weeks derived from the real fixture list
+- nflverse weekly stats → last completed season's actual production
+- Sleeper → ADP and season projections
+- Joins on `sleeper_id` (exact); name matching is a labelled, counted fallback
+- Refuses to write an empty or implausibly small dataset
+- Reports match counts and coverage gaps rather than filling them
+
+Verified against live nflverse: 951 players on 2026 rosters, bye weeks for all
+32 teams, **100% espn_id coverage**, 42 rookies. The Sleeper leg is unreachable
+from the dev sandbox and was exercised with a fixture; it runs for real via
+`Update Player Data.bat`.
+
+### Remaining
+- [ ] Run `Update Player Data.bat` on a machine that can reach Sleeper to
+      produce `data/players_2026.json`
+- [ ] Live pick sync during an actual 2026 draft (still never validated end-to-end)
+
+---
+
 ## Known Issues / Notes
 
 - ESPN API requires `lm-api-reads.fantasy.espn.com` subdomain (not `fantasy.espn.com`)
 - `espn_config.json` is gitignored — never commit it
+- The **2025** draft for league GAODT is complete; 2026 is the live season
 - The 2025 draft for league GAODT is **already complete** (`drafted: true, inProgress: false`) — live sync testing must wait for next draft or a test league
-- Player name matching falls back to top-available-by-VBD if ESPN player name isn't in our dataset — this can cause wrong players to be recorded during sync
+- ~~Player name matching falls back to top-available-by-VBD~~ — fixed: unmatched picks are skipped and reported, and matching now prefers exact espn_id

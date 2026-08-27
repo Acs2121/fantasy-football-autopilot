@@ -3,6 +3,7 @@ ESPN Fantasy Football live draft sync.
 Polls ESPN's draft API every N seconds and auto-records picks into DraftState.
 """
 
+import datetime
 import json
 import os
 import re
@@ -12,6 +13,18 @@ import time
 import urllib.parse
 
 import requests
+
+
+def current_season_year(today=None):
+    """Return the NFL season year that is currently relevant.
+
+    The NFL season spans September through February, and ESPN rolls a league
+    over to the new seasonId well before kickoff (drafts run through the
+    summer). Anything from June onward belongs to the season named after the
+    current calendar year; January-May still belongs to the prior season.
+    """
+    today = today or datetime.date.today()
+    return today.year if today.month >= 6 else today.year - 1
 
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
@@ -26,21 +39,26 @@ def _config_path():
     return os.path.join(os.path.dirname(__file__), "..", "espn_config.json")
 
 
-_DEFAULT_CONFIG = {
-    "league_id": None,
-    "year": 2025,
-    "swid": "",
-    "espn_s2": "",
-    "sync_interval_seconds": 5,
-}
+def _default_config():
+    return {
+        "league_id": None,
+        "year": current_season_year(),
+        "swid": "",
+        "espn_s2": "",
+        "sync_interval_seconds": 5,
+    }
 
 
 def load_espn_config():
     path = _config_path()
     if not os.path.exists(path):
-        return dict(_DEFAULT_CONFIG)
+        return _default_config()
     with open(path) as f:
-        return json.load(f)
+        cfg = json.load(f)
+    # Fill in anything a config written by an older version is missing.
+    for key, value in _default_config().items():
+        cfg.setdefault(key, value)
+    return cfg
 
 
 def save_espn_config(config):
@@ -98,8 +116,16 @@ class ESPNSync:
         self.league_info = None
         self.espn_draft_complete = False
         self._known_pick_count = 0
-        # espn_player_id -> local player id
-        self._espn_id_map = {}
+        self.unresolved_picks = []
+        # espn_player_id -> local player id. Seeded from the dataset's own
+        # espn_id fields when present, so pick matching is an exact id lookup
+        # rather than a name guess. Names remain a fallback for players whose
+        # id the dataset doesn't carry.
+        self._espn_id_map = {
+            str(p["espn_id"]): p["id"]
+            for p in draft_state.all_players
+            if p.get("espn_id")
+        }
         # normalized_name -> local player id
         self._name_map = {
             _normalize_name(p["name"]): p["id"]
@@ -116,20 +142,127 @@ class ESPNSync:
             "espn_s2": urllib.parse.unquote(self.config.get("espn_s2", "")),
         }
 
+    _API_BASE = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl"
+
     def _league_url(self, suffix=""):
+        """Build the league endpoint for the configured season.
+
+        ESPN serves the *current* season at /seasons/{year}/segments/0/leagues/{id}
+        but moves prior seasons to /leagueHistory/{id}?seasonId={year}. Hitting the
+        seasons path for a rolled-over season returns 404, which is the single most
+        confusing failure mode here — so pick the shape based on the year.
+        """
         lid = self.config["league_id"]
-        year = self.config.get("year", 2025)
-        return (
-            f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl"
-            f"/seasons/{year}/segments/0/leagues/{lid}{suffix}"
-        )
+        year = int(self.config.get("year") or current_season_year())
+
+        if year >= current_season_year():
+            return f"{self._API_BASE}/seasons/{year}/segments/0/leagues/{lid}{suffix}"
+
+        # seasonId always leads the query string; a caller-supplied "?..." suffix
+        # becomes "&..." so the two don't collide.
+        history_suffix = ("&" + suffix[1:]) if suffix.startswith("?") else suffix
+        return f"{self._API_BASE}/leagueHistory/{lid}?seasonId={year}{history_suffix}"
 
     def _get(self, url):
-        resp = requests.get(
-            url, cookies=self._cookies(), headers=self._HEADERS, timeout=10
-        )
+        try:
+            resp = requests.get(
+                url, cookies=self._cookies(), headers=self._HEADERS, timeout=10
+            )
+        except requests.exceptions.Timeout:
+            raise RuntimeError("ESPN didn't respond in time. Try again in a moment.")
+        except requests.exceptions.RequestException:
+            raise RuntimeError(
+                "Couldn't reach ESPN. Check your internet connection and try again."
+            )
+
+        # Translate ESPN's opaque status codes into something actionable. ESPN
+        # returns 404 (not 401/403) for a private league when cookies are missing
+        # or stale, so the naive reading -- "wrong league ID" -- is usually wrong.
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                "ESPN rejected your credentials (HTTP %d). Your espn_s2 / SWID "
+                "cookies are wrong or expired — grab fresh ones and re-enter them."
+                % resp.status_code
+            )
+        if resp.status_code == 404:
+            year = int(self.config.get("year") or current_season_year())
+            if not (self.config.get("swid") and self.config.get("espn_s2")):
+                raise RuntimeError(
+                    "ESPN returned 404. For a private league this almost always "
+                    "means missing credentials, not a bad League ID — enter your "
+                    "SWID and espn_s2 cookies below."
+                )
+            raise RuntimeError(
+                "ESPN returned 404 for league %s in season %d. Check that the "
+                "League ID is right and that the league existed that season."
+                % (self.config.get("league_id"), year)
+            )
+
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        # The leagueHistory endpoint wraps the league object in a list.
+        if isinstance(data, list):
+            if not data:
+                raise RuntimeError("ESPN returned no league data for that season.")
+            return data[0]
+        return data
+
+    # ── League discovery ───────────────────────────────────────────────────────
+
+    _FAN_API = "https://fan.api.espn.com/apis/v2/fans"
+
+    def list_leagues(self, year=None):
+        """Return every fantasy football league on the authenticated account.
+
+        ESPN's "fan" API keys off the SWID and returns the user's followed
+        entities, fantasy teams included. Shape is loosely specified and has
+        changed before, so parsing here is deliberately defensive: anything that
+        doesn't look like an FFL league entry is skipped rather than raising.
+        """
+        swid = self.config.get("swid", "").strip()
+        if not (swid and self.config.get("espn_s2")):
+            raise RuntimeError(
+                "Enter your SWID and espn_s2 first — ESPN can't list your "
+                "leagues without knowing who you are."
+            )
+
+        year = int(year or self.config.get("year") or current_season_year())
+
+        url = (
+            f"{self._FAN_API}/{urllib.parse.quote(swid)}"
+            "?featureFlags=expandAthlete&showAirings=buy,live,replay"
+            "&source=ESPN.com+-+FAM&lang=en&section=espn"
+        )
+        data = self._get(url)
+
+        found = []
+        for pref in (data.get("preferences") or []):
+            entry = (pref.get("metaData") or {}).get("entry") or {}
+            if str(entry.get("abbrev", "")).upper() != "FFL":
+                continue
+            for group in (entry.get("groups") or []):
+                gid = group.get("groupId")
+                if gid is None:
+                    continue
+                found.append({
+                    "league_id": int(gid),
+                    "name": group.get("groupName") or f"League {gid}",
+                    "team_name": entry.get("entryMetadata", {}).get("teamName")
+                                 or entry.get("name") or "",
+                    "season": int(entry.get("seasonId") or year),
+                })
+
+        # A league recurring across seasons appears once per season. Sort newest
+        # first, then keep only the most recent entry per league — otherwise the
+        # season shown depends on ESPN's arbitrary ordering of `preferences`.
+        found.sort(key=lambda l: (-l["season"], l["name"].lower()))
+        leagues, seen = [], set()
+        for entry in found:
+            if entry["league_id"] in seen:
+                continue
+            seen.add(entry["league_id"])
+            leagues.append(entry)
+        return leagues
 
     # ── Connection ─────────────────────────────────────────────────────────────
 
@@ -210,8 +343,10 @@ class ESPNSync:
 
     def _resolve_player(self, espn_player_id, pick):
         """Map an ESPN player ID to a local player ID, or return None if unknown."""
-        if espn_player_id in self._espn_id_map:
-            return self._espn_id_map[espn_player_id]
+        # Exact id match first — no ambiguity, no name normalization involved.
+        key = str(espn_player_id)
+        if key in self._espn_id_map:
+            return self._espn_id_map[key]
 
         full_name = self._extract_player_name(pick)
         if full_name:
@@ -219,10 +354,15 @@ class ESPNSync:
             # Direct match, then suffix-stripped fallback (e.g. "Patrick Mahomes II" -> "Patrick Mahomes")
             local_id = self._name_map.get(norm) or self._name_map.get(_strip_suffix(norm))
             if local_id:
-                self._espn_id_map[espn_player_id] = local_id
+                self._espn_id_map[key] = local_id
                 return local_id
 
-        return None  # Skip rather than record the wrong player
+        # Skip rather than record the wrong player — but record the miss, so a
+        # silently incomplete draft board is visible instead of invisible.
+        label = full_name or f"ESPN id {espn_player_id}"
+        if label not in self.unresolved_picks:
+            self.unresolved_picks.append(label)
+        return None
 
     # ── Sync loop ──────────────────────────────────────────────────────────────
 
@@ -301,4 +441,8 @@ class ESPNSync:
             "known_picks": self._known_pick_count,
             "running": self.running,
             "espn_draft_complete": self.espn_draft_complete,
+            # Picks ESPN reported that we couldn't match to a player. These are
+            # skipped rather than guessed, so surfacing them is the only way the
+            # user knows the board is incomplete.
+            "unresolved_picks": list(self.unresolved_picks),
         }

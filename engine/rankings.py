@@ -9,6 +9,8 @@ import json
 import logging
 import os
 
+from .season import current_season_year
+
 logger = logging.getLogger(__name__)
 
 _POS_CONSISTENCY_DEFAULTS = {
@@ -16,10 +18,53 @@ _POS_CONSISTENCY_DEFAULTS = {
 }
 
 
+def _player_data_path():
+    """Locate the player dataset, preferring the current season's file.
+
+    Falls back to the newest players_<year>.json present, so an older dataset
+    still loads rather than the app starting with an empty player pool.
+    """
+    data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+    preferred = os.path.join(data_dir, f"players_{current_season_year()}.json")
+    if os.path.exists(preferred):
+        return preferred
+
+    try:
+        candidates = sorted(
+            (f for f in os.listdir(data_dir)
+             if f.startswith("players_") and f.endswith(".json")),
+            reverse=True,
+        )
+    except OSError:
+        candidates = []
+
+    if candidates:
+        newest = os.path.join(data_dir, candidates[0])
+        logger.warning(
+            "No dataset for the %d season; falling back to %s. Projections and "
+            "ADP will be out of date — run rebuild_players.py to refresh.",
+            current_season_year(), candidates[0],
+        )
+        return newest
+    return preferred
+
+
+def dataset_season(filepath=None):
+    """Return the season the loaded dataset represents, or None if unknown."""
+    path = filepath or _player_data_path()
+    name = os.path.basename(path)
+    if name.startswith("players_") and name.endswith(".json"):
+        try:
+            return int(name[len("players_"):-len(".json")])
+        except ValueError:
+            return None
+    return None
+
+
 def load_players(filepath=None):
     """Load player data from JSON, applying consistency defaults."""
     if filepath is None:
-        filepath = os.path.join(os.path.dirname(__file__), "..", "data", "players_2025.json")
+        filepath = _player_data_path()
     try:
         with open(filepath, "r") as f:
             players = json.load(f)

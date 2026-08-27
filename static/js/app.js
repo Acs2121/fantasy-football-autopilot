@@ -59,6 +59,7 @@ async function api(path, opts = {}) {
 async function refreshAll() {
     const data = await api('/api/dashboard');
     state = data.state;
+    renderDataStatus(data.data_status);
     const recs = data.recommendations;
     const scarcity = data.scarcity;
     const winProb = data.win_probability;
@@ -81,6 +82,80 @@ async function refreshAll() {
     renderRecommendations(recs);
     renderScarcity(scarcity);
     renderAuction(state, recs);
+}
+
+function renderDataStatus(ds) {
+    const el = document.getElementById('stale-data-banner');
+    if (!el || !ds) return;
+    if (ds.stale) {
+        document.getElementById('stale-data-year').textContent = ds.dataset_season;
+        document.getElementById('stale-current-year').textContent = ds.current_season;
+        el.style.display = 'block';
+    } else {
+        el.style.display = 'none';
+    }
+}
+
+// One refresh, every source. Rebuilds the player list from current rosters,
+// then rescores it against last season's production.
+let dataRefreshPoll = null;
+let lastRefreshAt = 0;
+
+// The upstream feeds rate-limit repeated requests — Sleeper's player dump in
+// particular. Back-to-back refreshes were timing out, so hold the button for a
+// beat rather than letting a double-click stampede them.
+const REFRESH_COOLDOWN_MS = 60_000;
+
+function setRefreshStatus(text, color) {
+    const el = document.getElementById('data-refresh-status');
+    el.textContent = text;
+    el.style.color = color || 'var(--text-dim)';
+}
+
+async function refreshAllData() {
+    const btn = document.getElementById('btn-data-refresh');
+
+    const since = Date.now() - lastRefreshAt;
+    if (lastRefreshAt && since < REFRESH_COOLDOWN_MS) {
+        const wait = Math.ceil((REFRESH_COOLDOWN_MS - since) / 1000);
+        setRefreshStatus(
+            `Just refreshed. The data sources rate-limit repeat requests — ` +
+            `try again in ${wait}s.`, 'var(--yellow)');
+        return;
+    }
+
+    btn.disabled = true;
+    setRefreshStatus('Starting...');
+
+    const started = await api('/api/data/refresh', { method: 'POST' });
+    if (!started.ok) {
+        setRefreshStatus(started.error || 'Could not start refresh.', 'var(--yellow)');
+        btn.disabled = false;
+        return;
+    }
+
+    if (dataRefreshPoll) clearInterval(dataRefreshPoll);
+    dataRefreshPoll = setInterval(async () => {
+        const s = await api('/api/data/refresh/status');
+        if (s.state === 'running') {
+            setRefreshStatus(s.message);
+            return;
+        }
+        clearInterval(dataRefreshPoll);
+        dataRefreshPoll = null;
+        btn.disabled = false;
+        lastRefreshAt = Date.now();
+
+        if (s.state === 'success') {
+            setRefreshStatus(s.message, 'var(--green)');
+            lastRenderedPickCount = -1;
+            await fetchAvailable();
+            await refreshAll();
+        } else {
+            // A half-finished refresh must not read as success.
+            setRefreshStatus(s.message || 'Refresh failed.', 'var(--yellow)');
+        }
+    }, 2000);
 }
 
 // ============ Header ============
@@ -262,7 +337,7 @@ function showPlayerDetail(playerId) {
     const gamesCard = document.getElementById('pd-games-card');
     if (hasStats) {
         document.getElementById('pd-games').textContent =
-            player.games_played_2024 ? `${player.games_played_2024}` : '—';
+            player.games_played_last_season ? `${player.games_played_last_season}` : '—';
         gamesCard.style.display = '';
         drawRadarChart(player);
         document.getElementById('pd-radar-wrap').style.display = '';
@@ -944,61 +1019,6 @@ function closeKeepersModal() {
 
 // ============ Sleeper Refresh ============
 
-async function sleeperRefresh() {
-    const btn    = document.getElementById('btn-sleeper-refresh');
-    const status = document.getElementById('sleeper-refresh-status');
-    btn.disabled = true;
-    status.textContent = 'Fetching…';
-    status.className   = 'sleeper-status';
-    try {
-        const res = await api('/api/sleeper/refresh', { method: 'POST', body: JSON.stringify({ year: 2025 }) });
-        if (res.ok) {
-            status.textContent = `Updated ${res.updated} / ${res.total} players`;
-            status.className   = 'sleeper-status sleeper-ok';
-            // Re-fetch available list so new ADP/points show immediately
-            await fetchAvailable();
-            await refreshAll();
-        } else {
-            status.textContent = `Error: ${res.error}`;
-            status.className   = 'sleeper-status sleeper-err';
-        }
-    } catch (e) {
-        status.textContent = 'Network error';
-        status.className   = 'sleeper-status sleeper-err';
-    } finally {
-        btn.disabled = false;
-    }
-}
-
-async function nflStatsRefresh() {
-    const btn    = document.getElementById('btn-nfl-stats-refresh');
-    const status = document.getElementById('nfl-stats-status');
-    btn.disabled = true;
-    status.textContent = 'Fetching NFL stats… (may take 30s)';
-    status.className   = 'sleeper-status';
-    try {
-        const res = await api('/api/stats/refresh', {
-            method: 'POST',
-            body: JSON.stringify({ year: 2024, scoring_format: 'PPR', force: false }),
-        });
-        if (res.ok) {
-            const fb = res.fallback ? ` (${res.fallback} K/DST use projections)` : '';
-            status.textContent = `${res.updated} players scored from NFL data${fb}`;
-            status.className   = 'sleeper-status sleeper-ok';
-            await fetchAvailable();
-            await refreshAll();
-        } else {
-            status.textContent = `Error: ${res.error}`;
-            status.className   = 'sleeper-status sleeper-err';
-        }
-    } catch (e) {
-        status.textContent = 'Network error';
-        status.className   = 'sleeper-status sleeper-err';
-    } finally {
-        btn.disabled = false;
-    }
-}
-
 // ============ Auction Draft ============
 
 let _auctionNomPlayerId = null;
@@ -1242,10 +1262,28 @@ let lastKnownEspnPickCount = -1;
 
 function openESPNModal() {
     document.getElementById('espn-modal').style.display = 'flex';
-    // Pre-fill league ID if already configured
+    // Pre-fill league ID / season if already configured
     api('/api/espn/config').then(cfg => {
         if (cfg.league_id) {
             document.getElementById('espn-league-id').value = cfg.league_id;
+        }
+        if (cfg.year) {
+            document.getElementById('espn-year').value = cfg.year;
+        }
+        // Credentials are never sent back to the browser — only whether they exist.
+        const state = document.getElementById('espn-creds-state');
+        if (cfg.has_credentials) {
+            markSignedIn('Signed in to ESPN.');
+        } else {
+            state.textContent = '';
+            // Try the silent path immediately so a signed-in user never sees a
+            // credentials prompt at all.
+            detectESPNSession({ quiet: true }).then(found => {
+                if (!found) {
+                    setSignInState('Not signed in — click to connect your ESPN account.',
+                                   'var(--yellow)');
+                }
+            });
         }
     });
     // Refresh current status
@@ -1254,6 +1292,135 @@ function openESPNModal() {
 
 function closeESPNModal() {
     document.getElementById('espn-modal').style.display = 'none';
+}
+
+// ── ESPN sign-in ──────────────────────────────────────────────────────────────
+
+let espnAuthPoll = null;
+
+function setSignInState(text, color) {
+    const el = document.getElementById('espn-flow-state');
+    el.textContent = text;
+    el.style.color = color || 'var(--text-dim)';
+}
+
+function markSignedIn(msg) {
+    setSignInState(msg, 'var(--green)');
+    const credState = document.getElementById('espn-creds-state');
+    credState.textContent = '— saved ✓';
+    credState.style.color = 'var(--green)';
+    document.getElementById('espn-creds').open = false;
+}
+
+// Silent attempt: if the user is already logged into ESPN in a local browser,
+// this finds the session with no interaction at all.
+async function detectESPNSession({ quiet } = {}) {
+    const result = await api('/api/espn/auth/detect', { method: 'POST' });
+    if (result.ok) {
+        markSignedIn('Found your existing ESPN session — you\'re signed in.');
+        return true;
+    }
+    if (!quiet) setSignInState(result.error || 'No existing session found.', 'var(--yellow)');
+    return false;
+}
+
+// Wait for the login window to finish. Resolves true on success.
+function awaitESPNLogin() {
+    return new Promise(resolve => {
+        if (espnAuthPoll) clearInterval(espnAuthPoll);
+        espnAuthPoll = setInterval(async () => {
+            const s = await api('/api/espn/auth/status');
+            if (s.state === 'waiting') {
+                setSignInState(s.message);
+                return;
+            }
+            clearInterval(espnAuthPoll);
+            espnAuthPoll = null;
+            if (s.state === 'success') {
+                resolve(true);
+            } else {
+                setSignInState(s.message || 'Sign-in did not complete.', 'var(--yellow)');
+                resolve(false);
+            }
+        }, 2000);
+    });
+}
+
+async function ensureESPNSignedIn() {
+    setSignInState('Checking for an ESPN session...');
+    if (await detectESPNSession({ quiet: true })) return true;
+
+    setSignInState('Opening the ESPN sign-in window...');
+    const started = await api('/api/espn/auth/login', { method: 'POST' });
+    if (!started.ok) {
+        setSignInState(started.error || 'Could not start sign-in.', 'var(--yellow)');
+        return false;
+    }
+    return await awaitESPNLogin();
+}
+
+// One button, whole job: sign in -> find leagues -> connect -> start syncing.
+// Only stops to ask when it genuinely can't know the answer (multiple leagues).
+async function espnConnectFlow() {
+    const btn = document.getElementById('btn-espn-go');
+    btn.disabled = true;
+    document.getElementById('espn-league-picker').style.display = 'none';
+
+    try {
+        if (!await ensureESPNSignedIn()) return;
+
+        setSignInState('Finding your leagues...');
+        const result = await api('/api/espn/leagues', { method: 'POST', body: '{}' });
+        if (!result.ok) {
+            setSignInState(result.error || 'Could not load your leagues.', 'var(--yellow)');
+            document.getElementById('espn-creds').open = true;
+            return;
+        }
+
+        const leagues = result.leagues;
+        if (leagues.length === 1) {
+            await connectToLeague(leagues[0]);
+        } else {
+            renderLeagueChoices(leagues);
+        }
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function renderLeagueChoices(leagues) {
+    const picker = document.getElementById('espn-league-picker');
+    const list = document.getElementById('espn-league-list');
+    list.innerHTML = '';
+    leagues.forEach(l => {
+        const b = document.createElement('button');
+        b.className = 'btn btn-secondary';
+        b.style.textAlign = 'left';
+        b.textContent = l.team_name
+            ? `${l.name} — ${l.team_name} (${l.season})`
+            : `${l.name} (${l.season})`;
+        b.onclick = async () => {
+            picker.style.display = 'none';
+            await connectToLeague(l);
+        };
+        list.appendChild(b);
+    });
+    picker.style.display = 'block';
+    setSignInState(`Found ${leagues.length} leagues — pick one below.`, 'var(--green)');
+}
+
+// Connect to a specific league, then immediately start live sync. The season
+// comes from ESPN's own record of the league, not a guess.
+async function connectToLeague(league) {
+    setSignInState(`Connecting to ${league.name}...`);
+    document.getElementById('espn-league-id').value = league.league_id;
+    document.getElementById('espn-year').value = league.season;
+    await connectESPN();
+
+    if (document.getElementById('btn-espn-start').style.display !== 'none') {
+        setSignInState(`Connected to ${league.name} — starting live sync...`, 'var(--green)');
+        await startESPNSync();
+    }
 }
 
 async function connectESPN() {
@@ -1265,6 +1432,21 @@ async function connectESPN() {
 
     showESPNStatus('info', 'Connecting to ESPN...');
     document.getElementById('btn-espn-connect').disabled = true;
+
+    // Persist season + credentials before connecting. Blank credential fields
+    // are omitted so reopening the modal never wipes already-saved cookies.
+    const cfgPatch = { league_id: leagueId };
+    const year = document.getElementById('espn-year').value.trim();
+    const swid = document.getElementById('espn-swid').value.trim();
+    const s2 = document.getElementById('espn-s2').value.trim();
+    if (year) cfgPatch.year = year;
+    if (swid) cfgPatch.swid = swid;
+    if (s2) cfgPatch.espn_s2 = s2;
+
+    await api('/api/espn/config', {
+        method: 'POST',
+        body: JSON.stringify(cfgPatch),
+    });
 
     const result = await api('/api/espn/connect', {
         method: 'POST',
@@ -1352,7 +1534,17 @@ async function refreshESPNStatus() {
     if (status.status === 'live') {
         document.getElementById('btn-espn-start').style.display = 'none';
         document.getElementById('btn-espn-stop').style.display = 'inline-block';
-        showESPNStatus('success', `Live sync active. Picks tracked: ${status.known_picks}`);
+        const missed = status.unresolved_picks || [];
+        if (missed.length) {
+            // Never let an incomplete board look complete.
+            showESPNStatus('error',
+                `Live sync active. Picks tracked: ${status.known_picks}. ` +
+                `⚠️ ${missed.length} pick${missed.length === 1 ? '' : 's'} could not be matched ` +
+                `to a player and ${missed.length === 1 ? 'is' : 'are'} missing from the board: ` +
+                missed.slice(0, 5).join(', ') + (missed.length > 5 ? ', ...' : ''));
+        } else {
+            showESPNStatus('success', `Live sync active. Picks tracked: ${status.known_picks}`);
+        }
     } else if (status.status === 'connected' && status.league) {
         document.getElementById('btn-espn-start').style.display = 'inline-block';
         document.getElementById('btn-espn-stop').style.display = 'none';

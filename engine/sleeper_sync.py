@@ -18,6 +18,8 @@ import urllib.request
 import json
 import logging
 
+from .season import current_season_year
+
 logger = logging.getLogger(__name__)
 
 _SLEEPER_BASE = "https://api.sleeper.app/v1"
@@ -26,7 +28,7 @@ _TIMEOUT      = 10   # seconds per HTTP call
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
-def refresh_player_data(draft_state, year: int = 2025) -> dict:
+def refresh_player_data(draft_state, year: int = None) -> dict:
     """
     Pull fresh ADP + projected points from Sleeper and patch draft_state's
     player list in place.
@@ -34,6 +36,8 @@ def refresh_player_data(draft_state, year: int = 2025) -> dict:
     Returns a summary dict:
         { "updated": int, "total": int, "error": str|None }
     """
+    year = int(year or current_season_year())
+
     try:
         sleeper_players  = _fetch_json(f"{_SLEEPER_BASE}/players/nfl")
         sleeper_proj     = _fetch_json(f"{_SLEEPER_BASE}/projections/nfl/regular/{year}")
